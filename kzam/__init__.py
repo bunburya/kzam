@@ -2,24 +2,43 @@ import logging
 import os.path
 import shutil
 import subprocess
+import sys
 from argparse import ArgumentParser
 from datetime import date
-from typing import Optional
+from enum import IntEnum
+from typing import Optional, Collection
 
 import platformdirs
 
-from uzak.config import Config
-from uzak.datamodel import ArchiveDetails, ArchiveReference
-from uzak.db import DbManager
-from uzak.log import get_logger
-from uzak.parser import Parser, FileSizeSuffix, parse_date
-from uzak.download.base import BaseDownloader
-from uzak.download.direct import DirectDownloader
-try:
-    from uzak.download.torrent import QBitTorrentDownloader
-except ModuleNotFoundError:
-    QBitTorrentDownloader = None
+from kzam.config import Config
+from kzam.datamodel import ArchiveDetails, ArchiveReference, ArchiveEntry
+from kzam.db import DbManager
+from kzam.download import Downloader
+from kzam.log import get_logger
 
+
+def parse_date(s: str) -> date:
+    """Convert a date in the format "YYYY-MM" to a `date` object (using 1 for the `day` value)."""
+    y, m = s.split("-")
+    return date(
+        year=int(y),
+        month=int(m),
+        day=1
+    )
+
+class FileSizeSuffix(IntEnum):
+    B = 1
+    KB = 1024
+    MB = 1_048_576
+    GB = 1_073_741_824
+    TB = 1_099_511_627_776
+
+def str_to_bytes(s: str) -> int:
+    """Convert a human-readable description of a file size like "2.34 GB" to bytes."""
+    n, suf = s.split()
+    n = float(n)
+    mul = int(FileSizeSuffix[suf])
+    return int(n * mul)
 
 def bytes_to_str(b: int) -> str:
     """Convert a number of bytes to a human-readable description like "2.34 GB"."""
@@ -36,21 +55,10 @@ class ArchiveManager:
 
     def __init__(self, config: Config, logger: logging.Logger):
         self.config = config
-        if config.qbt_config is None:
-            self._downloader_cls: type[BaseDownloader] = DirectDownloader
-        else:
-            if QBitTorrentDownloader is None:
-                logger.warning("`qbittorrent` section found in config but `qbittorrent-api` module not installed. "
-                               "Reverting to direct downloader.")
-                self._downloader_cls = DirectDownloader
-            else:
-                self._downloader_cls = QBitTorrentDownloader
-
         self.logger = logger
         # Lazy initiate these as they may not be needed depending on the subcommands run
         self._db_manager: Optional[DbManager] = None
-        self._dl_manager: Optional[BaseDownloader] = None
-        self._parser: Optional[Parser] = None
+        self._dl_manager: Optional[Downloader] = None
         if os.path.isfile(config.base_dir):
             raise FileExistsError(f"Already a non-directory file at {config.base_dir}.")
         if os.path.isfile(config.archive_dir):
@@ -59,16 +67,10 @@ class ArchiveManager:
             os.makedirs(config.archive_dir)
 
     @property
-    def dl_manager(self) -> BaseDownloader:
+    def dl_manager(self) -> Downloader:
         if self._dl_manager is None:
-            self._dl_manager = self._downloader_cls(self.config, self.logger)
+            self._dl_manager = Downloader(self.config, self.logger)
         return self._dl_manager
-
-    @property
-    def parser(self) -> Parser:
-        if self._parser is None:
-            self._parser = Parser(self.config.content_url, self.config.archives)
-        return self._parser
 
     @property
     def db_manager(self) -> DbManager:
@@ -102,64 +104,69 @@ class ArchiveManager:
         if zim_id is not None:
             subprocess.run([self.config.kiwix_manage_exec, self.config.library_path, "remove", zim_id])
 
-    def update_old(self, prompt: bool = False):
-        all_new = self.parser.find_updated_archives(self.db_manager)
-        if not all_new:
-            self.logger.info("Nothing to download.")
-            return
-        if prompt:
-            n_downloads = len(all_new)
-            total_size_bytes = sum(d.size_bytes for d in all_new)
-            total_size = bytes_to_str(total_size_bytes)
-            proceed = input(f"Will download {n_downloads} archive(s) totalling approx {total_size}. Proceed? [y/N] ")
-            if proceed.lower() != "y":
-                self.logger.info("Aborting.")
-                return
-        for to_dl in all_new:
-            new = self.dl_manager.download(to_dl)
-            self.db_manager.insert_archive(new)
-            self.add_to_library(new)
-            if self.config.delete_old:
-                for old in self.db_manager.get_older(new.reference, new.date_created):
-                    old_path = os.path.join(self.config.archive_dir, old.file_name)
-                    self.logger.info(f"Deleting file at {old_path}.")
-                    os.remove(old_path)
-                    self.db_manager.delete_archive(old)
-                    self.remove_from_library(old)
+    def get_new(self) -> tuple[list[ArchiveEntry], list[ArchiveDetails]]:
+        # Map archive references to archive details
+        archive_refs: dict[ArchiveReference, Optional[ArchiveDetails]] = {r: None for r in self.config.archives}
+        # Get archives that we have already downloaded
+        current_archives = self.db_manager.all_archives()
+        to_delete: list[ArchiveDetails] = []
+        for a in current_archives:
+            # For each downloaded archive, if specified in the config, associate its reference with its details,
+            # otherwise, flag it for deletion (as presumably it was previously specified in the config but is no longer)
+            r = a.reference
+            if r in archive_refs:
+                archive_refs[r] = a
+            else:
+                to_delete.append(a)
+
+        # Get the set of all languages mentioned in any archive reference in the config, so we can restrict our search
+        # to those languages
+        lang: set[str] = set()
+        for r in archive_refs:
+            lang |= r.language
+        from_server = self.dl_manager.search(lang)
+        new: list[ArchiveEntry] = []
+        for e in from_server:
+            ref = e.to_reference()
+            if ref in archive_refs:
+                if (archive_refs[ref] is None) or (archive_refs[ref].updated < e.updated):
+                    new.append(e)
+        return new, to_delete
+
+    def get_archive_configs(
+            self,
+            lang: Optional[Collection[str]] = None,
+            category: Optional[str] = None,
+            query: Optional[str] = None
+    ) -> str:
+        return "\n\n".join((e.to_reference().to_config() for e in self.dl_manager.search(lang, category, query)))
 
     def update(self, prompt: bool = False, quiet: bool = False):
-        all_new = self.parser.find_updated_archives(self.db_manager)
-        if not all_new:
+        to_download, to_delete = self.get_new()
+        self.logger.info(f"Found {len(to_download)} updated archives to download.")
+        if to_download:
+            if prompt:
+                n_downloads = len(to_download)
+                print(f"Will download {n_downloads} archive(s). Proceed? [y/N] ", file=sys.stderr, end="")
+                proceed = input()
+                if proceed.lower() != "y":
+                    self.logger.info("Aborting.")
+                    return
+            downloaded = self.dl_manager.download_all(to_download, quiet=quiet)
+            for d in downloaded:
+                self.db_manager.insert_archive(d)
+                self.add_to_library(d)
+        else:
             self.logger.info("Nothing to download.")
-            return
-        if prompt:
-            n_downloads = len(all_new)
-            total_size_bytes = sum(d.size_bytes for d in all_new)
-            total_size = bytes_to_str(total_size_bytes)
-            proceed = input(f"Will download {n_downloads} archive(s) totalling approx {total_size}. Proceed? [y/N] ")
-            if proceed.lower() != "y":
-                self.logger.info("Aborting.")
-                return
-        downloaded = self.dl_manager.download_all(all_new, check_length=True, quiet=quiet)
-        for d in downloaded:
-            self.db_manager.insert_archive(d)
-            self.add_to_library(d)
-            if self.config.delete_old:
-                for old in self.db_manager.get_older(d.reference, d.date_created):
-                    old_path = os.path.join(self.config.archive_dir, old.file_name)
-                    self.logger.info(f"Deleting file at {old_path}.")
-                    os.remove(old_path)
-                    self.db_manager.delete_archive(old)
-                    self.remove_from_library(old)
-
-    def get_archive_configs(self, lang: Optional[str] = None) -> str:
-        """Scrape details of all archives from the website and return a string with their details in a format that can
-        be appended to a config file.
-
-        :param lang: If provided, only archives in this language will be listed.
-        """
-        sections = [a.to_config() for a in self.parser.find_archive_refs(lang)]
-        return "\n\n".join(sections)
+        if to_delete:
+            self.logger.info(f"{len(to_delete)} archives will be deleted as they no longer appear in the configuration file.")
+            for d in to_delete:
+                fpath = os.path.join(self.config.archive_dir, d.file_name)
+                if os.path.exists(fpath):
+                    self.logger.info(f"Deleting file at {fpath}.")
+                    os.remove(fpath)
+                self.db_manager.delete_archive(d)
+                self.remove_from_library(d)
 
     def add_file(
             self,
@@ -199,7 +206,7 @@ class ArchiveManager:
 
 
 def main():
-    arg_parser = ArgumentParser(description="Fetch new ZIM archives from download.kiwix.org.")
+    arg_parser = ArgumentParser(description="Fetch new ZIM archives from library.kiwix.org.")
     arg_parser.add_argument("-c", "--config", metavar="PATH", help="Path to config file to use.")
     arg_parser.add_argument("-d", "--debug", action="store_true", help="Debug mode (verbose logging).")
     arg_parser.add_argument("-q", "--quiet", action="store_true", help="Disable console output.")
@@ -211,8 +218,8 @@ def main():
     find_archives_parser = subparsers.add_parser("find-archives",
                                                  help="Get a list of all available archives, in an appropriate format "
                                                       "for inclusion in a config file.")
-    find_archives_parser.add_argument("--lang", help="Language to filter by.")
-    find_archives_parser.set_defaults(func=lambda mgr, ns: print(mgr.get_archive_configs(ns.lang)))
+    find_archives_parser.add_argument("--lang", help="Language to filter by.", default="eng")
+    find_archives_parser.set_defaults(func=lambda mgr, ns: print(mgr.get_archive_configs(ns.lang.split(","))))
     add_parser = subparsers.add_parser("add", help="Add a file to the library.")
     add_parser.add_argument("file", help="Path to file to add.")
     add_parser.add_argument("project", help="Project name of archive.")
@@ -223,7 +230,7 @@ def main():
                             help="Copy file to archives directory, rather than moving it.")
     add_parser.set_defaults(func=lambda mgr, ns: mgr.add_file(
         ns.file,
-        ArchiveReference(ns.project, ns.language, ns.flavor),
+        ArchiveReference(ns.project, ns.language, ns.flavour),
         parse_date(ns.date) if ns.date is not None else None,
         ns.copy
     ))

@@ -3,7 +3,7 @@ import tomllib
 from dataclasses import dataclass, field
 from typing import Optional
 
-from uzak.datamodel import ArchiveReference
+from kzam.datamodel import ArchiveReference
 
 
 @dataclass
@@ -17,7 +17,7 @@ class QbtConfig:
 @dataclass
 class Config:
     config_file_path: str
-    content_url: str
+    rss_base_url: str
     base_dir: str
     delete_old: bool
     kiwix_manage_exec: str
@@ -48,10 +48,10 @@ class Config:
             qbt_conf = None
         return Config(
             config_file_path=toml_file_path,
-            content_url=c["content_url"],
+            rss_base_url=c["rss_base_url"],
             base_dir=c["base_dir"],
             delete_old=c["delete_old"],
             kiwix_manage_exec=c["kiwix_manage_exec"],
             qbt_config=qbt_conf,
-            archives=[ArchiveReference(a["project"], a["language"], a["flavor"]) for a in c.get("archive", [])]
+            archives=[ArchiveReference(a["name"], frozenset(a["language"].split(",")), a.get("flavour")) for a in c.get("archive", [])]
         )

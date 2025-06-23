@@ -1,7 +1,7 @@
 import sqlite3
 from datetime import date, datetime
 
-from uzak.datamodel import ArchiveReference, ArchiveDetails
+from kzam.datamodel import ArchiveReference, ArchiveDetails
 
 sqlite3.register_adapter(date, lambda d: d.strftime("%Y-%m-%d"))
 sqlite3.register_converter("DATE", lambda b: datetime.strptime(b.decode(), "%Y-%m-%d").date())
@@ -12,21 +12,26 @@ class DbManager:
 
     CREATE_TABLE = """
         CREATE TABLE IF NOT EXISTS archives (
-            project TEXT NOT NULL,
+            name TEXT NOT NULL,
             language TEXT NOT NULL,
-            flavor TEXT,
-            date_created DATE NOT NULL,
-            file_name TEXT NOT NULL
+            flavour TEXT,
+            updated DATETIME NOT NULL,
+            file_name TEXT NOT NULL,
+            PRIMARY KEY (name, language, flavour)
         )
     """
 
     SELECT_ARCHIVES = """
         SELECT * FROM archives
         WHERE
-            project = ?
+            name = ?
             AND language = ?
-            AND flavor = ?
-        ORDER BY date_created DESC
+            AND flavour = ?
+        ORDER BY updated DESC
+    """
+
+    SELECT_ALL_ARCHIVES = """
+        SELECT * FROM archives
     """
 
     INSERT_ARCHIVE = """
@@ -37,29 +42,29 @@ class DbManager:
     SELECT_OLDER = """
         SELECT * FROM archives
         WHERE
-            project = ?
+            name = ?
             AND language = ?
-            AND flavor = ?
-            AND date_created < ?
+            AND flavour = ?
+            AND updated < ?
     """
 
     DELETE_ARCHIVE = """
         DELETE FROM archives
         WHERE
-            project = ?
+            name = ?
             AND language = ?
-            AND flavor = ?
-            AND date_created = ?
+            AND flavour = ?
+            AND updated = ?
     """
 
     ARCHIVE_EXISTS = """
         SELECT EXISTS(
             SELECT 1 FROM archives
                 WHERE
-                    project = ?
+                    name = ?
                     AND language = ?
-                    AND flavor = ?
-                    AND date_created = ?
+                    AND flavour = ?
+                    AND updated = ?
         )
     """
 
@@ -75,42 +80,52 @@ class DbManager:
 
     def find_archives(self, ref: ArchiveReference) -> list[ArchiveDetails]:
         with self.conn:
-            result = self.conn.execute(self.SELECT_ARCHIVES, (ref.project, ref.language, ref.flavor))
+            result = self.conn.execute(
+                self.SELECT_ARCHIVES,
+                (ref.name, ",".join(sorted(ref.language)), ref.flavour)
+            )
         return [ArchiveDetails.from_row(r) for r in result]
 
-    def archive_exists(self, ref: ArchiveReference, date_created: date) -> bool:
+    def all_archives(self) -> list[ArchiveDetails]:
+        with self.conn:
+            result = self.conn.execute(
+                self.SELECT_ALL_ARCHIVES,
+            )
+        return [ArchiveDetails.from_row(r) for r in result]
+
+    def archive_exists(self, ref: ArchiveReference, updated: datetime) -> bool:
         with self.conn:
             return bool(self.conn.execute(self.ARCHIVE_EXISTS, (
-                ref.project,
-                ref.language,
-                ref.flavor,
-                date_created
+                ref.name,
+                ",".join(sorted(ref.language)),
+                ref.flavour,
+                updated
             )).fetchone()[0])
 
     def get_older(self, ref: ArchiveReference, older_than: date) -> list[ArchiveDetails]:
         with self.conn:
             return [ArchiveDetails.from_row(r) for r in self.conn.execute(self.SELECT_OLDER, (
-                ref.project,
-                ref.language,
-                ref.flavor,
+                ref.name,
+                ",".join(sorted(ref.language)),
+                ref.flavour,
                 older_than
             ))]
 
     def delete_archive(self, archive: ArchiveDetails):
         with self.conn:
             self.conn.execute(self.DELETE_ARCHIVE, (
-                archive.reference.project,
-                archive.reference.language,
-                archive.reference.flavor,
-                archive.date_created
+                archive.reference.name,
+                ",".join(sorted(archive.reference.language)),
+                archive.reference.flavour,
+                archive.updated
             ))
 
     def insert_archive(self, archive: ArchiveDetails):
         with self.conn:
             self.conn.execute(self.INSERT_ARCHIVE, (
-                archive.reference.project,
-                archive.reference.language,
-                archive.reference.flavor,
-                archive.date_created.strftime("%Y-%m-%d"),
+                archive.reference.name,
+                ",".join(sorted(archive.reference.language)),
+                archive.reference.flavour,
+                archive.updated,
                 archive.file_name
             ))

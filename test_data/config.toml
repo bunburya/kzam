@@ -21,11 +21,11 @@ flavor = "maxi"
 language = "eng"
 
 [[archive]]
-project = "history.stackexchange.com_en_all"
+name = "history.stackexchange.com_en_all"
 flavor = "all"
 language = "eng"
 
 [[archive]]
-project = "law.stackexchange.com_en_all"
+name = "law.stackexchange.com_en_all"
 flavor = "all"
 language = "eng"

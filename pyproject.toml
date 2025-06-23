@@ -6,7 +6,6 @@ build-backend = "setuptools.build_meta"
 name = "uzak"
 version = "0.1"
 dependencies = [
-    "bs4",
     "requests",
     "psutil",
     "tqdm",
