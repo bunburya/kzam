@@ -125,10 +125,11 @@ class Downloader:
                 position=pbar_position,
                 leave=(pbar_position is None),  # Only leave traces if we're not in multithreaded environment
                 disable=quiet
-        ):
+        ) as pb:
             with open(part_path, 'wb') as f:
                 for chunk in content_response.iter_content(chunk_size=1024 * 1024):
-                    f.write(chunk)
+                    n = f.write(chunk)
+                    pb.update(n)
 
         os.rename(part_path, dst_path)
 

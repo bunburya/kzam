@@ -209,7 +209,7 @@ def main():
     if args.debug:
         logging.basicConfig(level=logging.DEBUG)
 
-    default_conf_file = os.path.join(platformdirs.user_config_dir(appname="uzak"), "config.toml")
+    default_conf_file = os.path.join(platformdirs.user_config_dir(appname="kzam"), "config.toml")
     conf_file = args.config or default_conf_file
     if not os.path.isfile(conf_file):
         raise FileNotFoundError(f"Could not find configuration file at {conf_file}")
