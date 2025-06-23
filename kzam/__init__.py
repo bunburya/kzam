@@ -168,42 +168,6 @@ class ArchiveManager:
                 self.db_manager.delete_archive(d)
                 self.remove_from_library(d)
 
-    def add_file(
-            self,
-            filepath: str,
-            ref: ArchiveReference,
-            date_created: Optional[date] = None,
-            copy: bool = True
-    ) -> ArchiveDetails:
-        if date_created is None:
-            # Try parse from filepath
-            date_str = filepath.removesuffix(".zim").split("_")[-1]
-            date_created = parse_date(date_str)
-        if self.db_manager.archive_exists(ref, date_created):
-            raise ValueError(f"Archive already exists in database: f{ref}")
-        archive_filename = ref.to_file_name(date_created)
-        archive_filepath = os.path.join(self.config.archive_dir, archive_filename)
-        if os.path.exists(archive_filepath):
-            raise FileExistsError(f"File already exists: {archive_filepath}")
-        archive = ArchiveDetails(
-            ref,
-            date_created,
-            archive_filename,
-        )
-        if copy:
-            shutil.copyfile(filepath, archive_filepath)
-        else:
-            os.rename(filepath, archive_filepath)
-        self.db_manager.insert_archive(archive)
-        if ref not in self.config.archives:
-            with open(self.config.config_file_path, "a") as f:
-                f.write("\n")
-                f.write(ref.to_config())
-                f.write("\n")
-            self.config.archives.append(ref)
-        self.logger.info(f"Added {filepath} to archive as {archive_filename}.")
-        return archive
-
 
 def main():
     arg_parser = ArgumentParser(description="Fetch new ZIM archives from library.kiwix.org.")
@@ -215,26 +179,29 @@ def main():
     update_parser.add_argument("-p", "--prompt", action="store_true",
                                help="Prompt for confirmation (once) before downloading.")
     update_parser.set_defaults(func=lambda mgr, ns: mgr.update(ns.prompt, quiet=ns.quiet))
-    find_archives_parser = subparsers.add_parser("find-archives",
-                                                 help="Get a list of all available archives, in an appropriate format "
-                                                      "for inclusion in a config file.")
-    find_archives_parser.add_argument("--lang", help="Language to filter by.", default="eng")
-    find_archives_parser.set_defaults(func=lambda mgr, ns: print(mgr.get_archive_configs(ns.lang.split(","))))
-    add_parser = subparsers.add_parser("add", help="Add a file to the library.")
-    add_parser.add_argument("file", help="Path to file to add.")
-    add_parser.add_argument("project", help="Project name of archive.")
-    add_parser.add_argument("language", help="Language of archive.")
-    add_parser.add_argument("flavor", help="Flavour of archive.")
-    add_parser.add_argument("date", help="Date archive was created, in YYYY-MM format.", nargs="?")
-    add_parser.add_argument("--copy", action="store_true",
-                            help="Copy file to archives directory, rather than moving it.")
-    add_parser.set_defaults(func=lambda mgr, ns: mgr.add_file(
-        ns.file,
-        ArchiveReference(ns.project, ns.language, ns.flavour),
-        parse_date(ns.date) if ns.date is not None else None,
-        ns.copy
-    ))
-
+    search_parser = subparsers.add_parser(
+        "search",
+        help="Search for available archives and output results in an appropriate format for inclusion in a config file."
+    )
+    search_parser.add_argument(
+        "--lang",
+        help="Language(s) to filter by, as a comma-separated list of three-letter codes (eg \"eng,fra\")."
+    )
+    search_parser.add_argument(
+        "--category",
+        help="Category to filter by."
+    )
+    search_parser.add_argument(
+        "--query",
+        help="Query to filter by (ie, text that results must match in title or description)."
+    )
+    search_parser.set_defaults(
+        func=lambda mgr, ns: print(mgr.get_archive_configs(
+            ns.lang.split(",") if ns.lang else None,
+            ns.category,
+            ns.query
+        ))
+    )
     args = arg_parser.parse_args()
 
     logger = get_logger(__name__, args.quiet)
